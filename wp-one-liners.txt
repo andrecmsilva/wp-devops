@@ -3,3 +3,15 @@ dbuser=$(wp config get DB_USER) && dbname=$(wp config get DB_NAME) && dbpass=$(w
 
 #one liner for database performance report
 dbuser=$(wp config get DB_USER) && dbname=$(wp config get DB_NAME) && dbpass=$(wp config get DB_PASSWORD) && mysql -u "$dbuser" -p"$dbpass" -e "use $dbname; show status;" | grep -E 'Threads_connected|Threads_running|Queries|Uptime|Slow_queries|Table_open_cache_hits|Table_open_cache_misses|Innodb_buffer_pool_reads|Innodb_buffer_pool_wait_free|Innodb_row_lock_waits|Innodb_data_reads|Innodb_data_writes|Innodb_os_log_written|Innodb_log_waits|Max_used_connections' | awk '{ printf "%-25s : %s\n", $1, $2 }'
+
+#check disk usage for the current directory
+echo '###Largest files and folders###': ; du -ah . | sort -h -r | head -n 15 ; echo '###Total size###' ; du -sh
+
+#check wordpress vitals
+wp core version; echo Home URL $(wp option get home) ; echo Site URL $(wp option get siteurl);echo '### Plugins ###';  wp plugin list;echo '### Themes ###'; wp theme list;echo '### Users ###' ; wp user list --role=administrator; echo '### Roles ###'; wp role list; wp core verify-checksums;echo '###Total size###';du -sh
+
+#check manual backups and move to public_html sending a download link
+cd ~/softaculous_backups && echo 'Files starting with 'wp':' && ls -lt wp* && read -p 'Enter the filename to move: ' filename && mv '$filename' ~/public_html/ && echo 'File moved successfully to ~/public_html/' && cd ~/public_html && echo 'Changed directory to ~/public_html/' && chmod 644 '$filename' && echo 'File permissions changed to 644 successfully' && domain_name=$(wp option get home) && echo 'Link: $domain_name/$filename'
+
+#export AIO backup with wp-cli
+wp plugin install all-in-one-wp-migration https://rocketscripts.space/assets/aiounlimited.zip --activate --skip-plugins --skip-themes && wp ai1wm backup --exclude-cache && backupname=$(ls -t /home/tbil6/public_html/wp-content/ai1wm-backups/*.wpress | head -n 1) && domain=$(wp option get home) && echo "wget -c $domain/$backupname"
