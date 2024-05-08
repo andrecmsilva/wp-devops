@@ -14,4 +14,23 @@ wp core version; echo Home URL $(wp option get home) ; echo Site URL $(wp option
 cd ~/softaculous_backups && echo 'Files starting with 'wp':' && ls -lt wp* && read -p 'Enter the filename to move: ' filename && mv '$filename' ~/public_html/ && echo 'File moved successfully to ~/public_html/' && cd ~/public_html && echo 'Changed directory to ~/public_html/' && chmod 644 '$filename' && echo 'File permissions changed to 644 successfully' && domain_name=$(wp option get home) && echo 'Link: $domain_name/$filename'
 
 #export AIO backup with wp-cli
-wp plugin install all-in-one-wp-migration https://rocketscripts.space/assets/aiounlimited.zip --activate --skip-plugins --skip-themes && wp ai1wm backup --exclude-cache && backupname=$(ls -t /home/tbil6/public_html/wp-content/ai1wm-backups/*.wpress | head -n 1) && domain=$(wp option get home) && echo "wget -c $domain/$backupname"
+wp plugin install all-in-one-wp-migration https://rocketscripts.space/assets/aiounlimited.zip --activate --skip-plugins --skip-themes && wp ai1wm backup --exclude-cache && backupname=$(ls -t ~/public_html/wp-content/ai1wm-backups/*.wpress | head -n 1) && domain=$(wp option get home) && echo "wget -c $domain/$backupname"
+
+#check logs for fatal errors
+echo 'public_html/error_log' ; grep -r 'PHP Fatal error:' ~/public_html/error_log | tail -n 5 ; echo 'wp-admin/error_log' ; grep -r 'PHP Fatal error:' ~/public_html/wp-admin/error_log | tail -n 5 ; echo 'wp-content/debug.log' ; grep -r 'PHP Fatal error:' ~/public_html/wp-content/debug.log | tail -n 5
+
+#reset.htaccess
+cp ~/public_html/.htaccess ~/public_html/.htaccess.backup.$(date +%Y%m%d%H%M%S) && cat << EOF > ~/public_html/.htaccess
+# BEGIN WordPress
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+# END WordPress
+EOF
+
+#exclude page from cache
+read -p "Enter the path: " path && sed -i "1i<If \"%{THE_REQUEST} =~ m# /$path/?#i\">\nHeader always set Cloudflare-CDN-Cache-Control \"max-age=0, smax-age=0\" \"expr=%{CONTENT_TYPE} == 'text/html; charset=UTF-8'\"\nHeader always set x-rocket \"0\"\n</If>\n" ~/public_html/.htaccess
