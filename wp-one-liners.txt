@@ -1,0 +1,5 @@
+#One Liner to grab mysql details - login to mysql - and check proccess list or run other commands"
+dbuser=$(wp config get DB_USER) && dbname=$(wp config get DB_NAME) && dbpass=$(wp config get DB_PASSWORD) && mysql -u "$dbuser" -p"$dbpass" -e "use $dbname; show full processlist;"
+
+#one liner for database performance report
+dbuser=$(wp config get DB_USER) && dbname=$(wp config get DB_NAME) && dbpass=$(wp config get DB_PASSWORD) && mysql -u "$dbuser" -p"$dbpass" -e "use $dbname; show status;" | grep -E 'Threads_connected|Threads_running|Queries|Uptime|Slow_queries|Table_open_cache_hits|Table_open_cache_misses|Innodb_buffer_pool_reads|Innodb_buffer_pool_wait_free|Innodb_row_lock_waits|Innodb_data_reads|Innodb_data_writes|Innodb_os_log_written|Innodb_log_waits|Max_used_connections' | awk '{ printf "%-25s : %s\n", $1, $2 }'
