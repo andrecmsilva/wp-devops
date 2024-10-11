@@ -34,3 +34,13 @@ EOF
 
 #exclude page from cache
 read -p "Enter the path: " path && sed -i "1i<If \"%{THE_REQUEST} =~ m# /$path/?#i\">\nHeader always set Cloudflare-CDN-Cache-Control \"max-age=0, smax-age=0\" \"expr=%{CONTENT_TYPE} == 'text/html; charset=UTF-8'\"\nHeader always set x-rocket \"0\"\n</If>\n" ~/public_html/.htaccess
+
+#search access logs
+grepz "" ~/logs/* | grep ""
+
+#move manual backups to public_html
+cd ~/softaculous_backups && echo "Files starting with 'wp':" && ls -lt wp* && read -p "Enter the filename to move: " filename && mv "$filename" ~/public_html/ && echo "File moved successfully to ~/public_html/" && cd ~/public_html && echo "Changed directory to ~/public_html/" && chmod 644 "$filename" && echo "File permissions changed to 644 successfully" && domain_name=$(wp option get home) && echo "Link: $domain_name/$filename"
+
+#Search Apache error logs
+grep -r '' /usr/local/apache/logs/error_log | grep ''
+
