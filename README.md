@@ -1,21 +1,38 @@
 # WordPress Backup Export CLI Tool
 
-A command-line tool for automating WordPress site backups using the All-in-One WP Migration plugin.
+A command-line and web-based tool for automating WordPress site backups and migrations to Rocket.net.
 
-## What it does
+## Key Features
 
-This script automates the process of:
-1. Logging into your WordPress admin dashboard
-2. Installing the All-in-One WP Migration plugin (if not already installed)
-3. Initiating a site export/backup
-4. Providing a downloadable URL for the backup file
+- **Automated Export**: Logs in and generates All-in-One WP Migration backups automatically.
+- **Rocket.net Integration**: Creates destination sites and sets up SSH keys via API.
+- **Remote Restoration**: Downloads and restores backups on Rocket.net using `rmig`.
+- **Modern Web UI**: A beautiful, glassmorphic interface for managing migrations without the CLI.
 
-## Requirements
+## Web User Interface (Recommended)
+
+![Migration Assistant UI](/Users/andrecorrea/.gemini/antigravity/brain/5c6a45c1-841d-4698-bcf0-1797fb314aa6/migration_assistant_ui_1768921663513.png)
+
+The easiest way to use this tool is via the built-in Web UI.
+
+1. **Install Dependencies**:
+   ```bash
+   python3 -m pip install fastapi uvicorn requests playwright
+   python3 -m playwright install chromium
+   ```
+2. **Start the Server**:
+   ```bash
+   python3 app.py
+   ```
+3. **Access the UI**: Open **[http://localhost:8000](http://localhost:8000)** in your browser.
+
+## CLI Usage (Advanced)
 
 - Python 3.6+
 - Playwright for Python
   - Install with: `pip install playwright`
   - Install browsers: `playwright install chromium`
+- Requests: `pip install requests`
 
 ## Usage
 
@@ -31,12 +48,36 @@ Example:
 python cli-export-aio.py --admin-url https://rocket.net/wp-admin/ --username hello@rocket.net --password 'pass'
 ```
 
+### Rocket.net Migration (Optional)
+
+You can automatically migrate the backup to Rocket.net:
+
+```bash
+python exportaiocli.py \
+  --admin-url https://example.com/wp-admin \
+  --username admin \
+  --password 'pass' \
+  --rocket-token 'YOUR_ROCKET_API_TOKEN' \
+  --rocket-name 'new-site-slug' \
+  --rocket-location 21
+```
+
 ### Parameters
 
+#### WordPress source:
 - `--admin-url`: Your WordPress admin URL (e.g., https://example.com/wp-admin)
 - `--username`: WordPress admin username
 - `--password`: WordPress admin password
 - `--visual`: (Optional) Run in visual mode to see the browser automation
+
+#### Rocket.net destination (Optional):
+- `--rocket-token`: Your Rocket.net API Token (can also be set via `ROCKET_NET_TOKEN` environment variable)
+- `--rocket-name`: The slug/name for the new site on Rocket.net
+- `--rocket-location`: Location ID (e.g., 12 for US Central, 21 for US East)
+- `--rocket-label`: Label for the site in Rocket dashboard
+- `--rocket-admin-user`: Admin username for the new site (default: admin)
+- `--rocket-admin-pass`: Admin password for the new site (randomly generated if omitted)
+- `--ssh-key-path`: Path to your SSH public key (default: `~/.ssh/id_ed25519.pub` or `~/.ssh/id_rsa.pub`)
 
 ## Important Notes
 

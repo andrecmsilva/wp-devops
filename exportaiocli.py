@@ -5,6 +5,12 @@ import time
 import argparse
 import asyncio
 import sys
+import requests
+import subprocess
+import json
+import secrets
+import string
+from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # If running as PyInstaller bundle, set browser path to the bundled browser
@@ -45,6 +51,107 @@ async def setup_browser(headless=True):
     page = await context.new_page()
     page.set_default_timeout(30000)  # 30 seconds default timeout
     return playwright, browser, context, page
+
+class RocketAPI:
+    def __init__(self, token):
+        self.token = token
+        self.base_url = "https://api.rocket.net/v1"
+        self.headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "authorization": f"Bearer {self.token}"
+        }
+
+    def create_site(self, name, location, admin_user, admin_pass, admin_email, label):
+        url = f"{self.base_url}/sites"
+        payload = {
+            "multisite": False,
+            "name": name,
+            "location": location,
+            "admin_username": admin_user,
+            "admin_password": admin_pass,
+            "admin_email": admin_email,
+            "label": label,
+            "static_site": False,
+            "php_version": "8.3"
+        }
+        response = requests.post(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
+
+    def get_site_info(self, site_id):
+        url = f"{self.base_url}/sites/{site_id}"
+        response = requests.get(url, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
+
+    def add_ssh_key(self, site_id, name, public_key):
+        url = f"{self.base_url}/sites/{site_id}/ssh/keys"
+        payload = {
+            "name": name,
+            "key": public_key
+        }
+        response = requests.post(url, json=payload, headers=self.headers)
+        # If key already exists, we might get an error, but we can usually continue
+        if response.status_code != 200 and response.status_code != 201:
+            print(f"Warning: SSH key addition returned {response.status_code}: {response.text}")
+        return response.json()
+
+    def authorize_ssh_key(self, site_id, name):
+        url = f"{self.base_url}/sites/{site_id}/ssh/keys/authorize"
+        payload = { "name": name }
+        response = requests.post(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
+
+    def enable_ssh_access(self, site_id):
+        url = f"{self.base_url}/sites/{site_id}/settings"
+        payload = { "ssh_access": 1 }
+        response = requests.patch(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
+
+def get_ssh_key(key_path=None):
+    if not key_path:
+        key_path = os.path.expanduser("~/.ssh/id_ed25519.pub")
+        if not os.path.exists(key_path):
+            key_path = os.path.expanduser("~/.ssh/id_rsa.pub")
+    
+    if os.path.exists(key_path):
+        with open(key_path, 'r') as f:
+            return f.read().strip(), os.path.basename(key_path).split('.')[0]
+    return None, None
+
+async def run_remote_migration(sftp_user, host_ip, backup_url):
+    print(f"Starting remote migration on {host_ip} for user {sftp_user}...")
+    
+    # Building the remote command
+    # Step 9 & 10 from instructions
+    remote_cmd = (
+        f"wget -c '{backup_url}' && "
+        f"wget -c http://wpscripts.onrocket.cloud/assets/rmig --header='User-Agent: RocketScripts' && "
+        f"bash rmig restoreaio latest"
+    )
+    
+    ssh_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no",
+        f"{sftp_user}@{host_ip}",
+        remote_cmd
+    ]
+    
+    print(f"Executing: {' '.join(ssh_cmd)}")
+    process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    
+    for line in process.stdout:
+        print(f"[SSH] {line.strip()}")
+    
+    process.wait()
+    if process.returncode == 0:
+        print("Remote migration completed successfully!")
+        return True
+    else:
+        print(f"Remote migration failed with return code {process.returncode}")
+        return False
 
 async def wait_for_page_load(page, timeout=30):
     """Wait for page to be fully loaded."""
@@ -255,6 +362,16 @@ async def main_async(visual_mode=False):
     parser.add_argument("--password", required=True, help="WordPress admin password")
     parser.add_argument("--visual", action="store_true", help="Run in visual mode (show browser window)")
     
+    # Rocket.net arguments
+    parser.add_argument("--rocket-token", help="Rocket.net API Token")
+    parser.add_argument("--rocket-name", help="New site name for Rocket.net")
+    parser.add_argument("--rocket-location", type=int, default=12, help="Rocket.net location ID (default: 12 - US Central)")
+    parser.add_argument("--rocket-label", help="Rocket.net site label")
+    parser.add_argument("--rocket-admin-user", default="admin", help="Rocket.net admin username")
+    parser.add_argument("--rocket-admin-pass", help="Rocket.net admin password (random if not provided)")
+    parser.add_argument("--rocket-admin-email", help="Rocket.net admin email")
+    parser.add_argument("--ssh-key-path", help="Path to your local SSH public key")
+    
     args = parser.parse_args()
     
     # Initialize timing statistics
@@ -307,6 +424,72 @@ async def main_async(visual_mode=False):
         if backup_url:
             print("\nTo download the backup file, use this command:")
             print(f"wget -c {backup_url}")
+            
+            # Check if Rocket.net migration is requested
+            rocket_token = args.rocket_token or os.environ.get("ROCKET_NET_TOKEN")
+            if rocket_token and args.rocket_name:
+                print("\n" + "="*50)
+                print("STARTING ROCKET.NET MIGRATION")
+                print("="*50)
+                
+                try:
+                    rocket = RocketAPI(rocket_token)
+                    
+                    # 5. Create site
+                    print(f"Creating site '{args.rocket_name}' on Rocket.net...")
+                    if args.rocket_admin_pass:
+                        admin_pass = args.rocket_admin_pass
+                    else:
+                        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+                        admin_pass = ''.join(secrets.choice(alphabet) for i in range(16))
+                    
+                    admin_email = args.rocket_admin_email or f"admin@{args.rocket_name}.com"
+                    
+                    site_creation = rocket.create_site(
+                        name=args.rocket_name,
+                        location=args.rocket_location,
+                        admin_user=args.rocket_admin_user,
+                        admin_pass=admin_pass,
+                        admin_email=admin_email,
+                        label=args.rocket_label or args.rocket_name
+                    )
+                    
+                    site_id = site_creation['result']['id']
+                    temp_domain = site_creation['result']['domain']
+                    print(f"Site created! ID: {site_id}, Domain: {temp_domain}")
+                    print(f"Admin Credentials: {args.rocket_admin_user} / {admin_pass}")
+                    
+                    # 6. Get site info
+                    print("Fetching site details (IP and SFTP User)...")
+                    # Rocket.net might need a moment to provision
+                    time.sleep(5)
+                    site_info = rocket.get_site_info(site_id)
+                    sftp_user = site_info['result']['sftp_username']
+                    host_ip = site_info['result']['ftp_ip_address']
+                    print(f"SFTP User: {sftp_user}, host IP: {host_ip}")
+                    
+                    # 7. SSH Key setup
+                    pub_key, key_name = get_ssh_key(args.ssh_key_path)
+                    if pub_key:
+                        print(f"Importing SSH key '{key_name}'...")
+                        rocket.add_ssh_key(site_id, key_name, pub_key)
+                        print(f"Authorizing SSH key '{key_name}'...")
+                        rocket.authorize_ssh_key(site_id, key_name)
+                        print("Enabling SSH access...")
+                        rocket.enable_ssh_access(site_id)
+                        
+                        # Wait a bit for SSH access to be active
+                        print("Waiting for SSH to become active (10s)...")
+                        time.sleep(10)
+                        
+                        # 8, 9, 10. Run remote migration
+                        await run_remote_migration(sftp_user, host_ip, backup_url)
+                    else:
+                        print("Warning: No SSH public key found. Skipping remote migration steps.")
+                        print(f"You can manually migration by connecting to {sftp_user}@{host_ip}")
+                
+                except Exception as e:
+                    print(f"Error during Rocket.net migration: {str(e)}")
         else:
             print("Failed to get backup URL")
         
