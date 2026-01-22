@@ -11,7 +11,52 @@ import json
 import secrets
 import string
 from pathlib import Path
+from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+
+def log_info(message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
+
+# Common modern User-Agent to use across requests and Playwright
+MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+class NetworkClient:
+    """A robust network client with retries and browser-like headers."""
+    
+    @staticmethod
+    def get_session():
+        session = requests.Session()
+        
+        # Configure retries
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        
+        # Set browser-like headers
+        session.headers.update({
+            "User-Agent": MODERN_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        })
+        
+        return session
 
 # If running as PyInstaller bundle, set browser path to the bundled browser
 def set_playwright_browser_path():
@@ -22,7 +67,7 @@ def set_playwright_browser_path():
         browser_path = os.path.join(bundle_dir, 'playwright', '.local-browsers')
         if os.path.exists(browser_path):
             os.environ['PLAYWRIGHT_BROWSERS_PATH'] = browser_path
-            print(f"Using bundled browser at: {browser_path}")
+            log_info(f"Using bundled browser at: {browser_path}")
             return True
     return False
 
@@ -41,12 +86,13 @@ async def setup_browser(headless=True):
             "--disable-extensions",
             "--disable-infobars",
             "--disable-notifications",
-            "--disable-popup-blocking"
+            "--disable-popup-blocking",
+            "--disable-blink-features=AutomationControlled" # Hide automation flag
         ]
     )
     context = await browser.new_context(
         viewport={"width": 1920, "height": 1080},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        user_agent=MODERN_USER_AGENT
     )
     page = await context.new_page()
     page.set_default_timeout(30000)  # 30 seconds default timeout
@@ -56,11 +102,13 @@ class RocketAPI:
     def __init__(self, token):
         self.token = token
         self.base_url = "https://api.rocket.net/v1"
-        self.headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "authorization": f"Bearer {self.token}"
-        }
+        self.session = NetworkClient.get_session()
+        # Authorization header is specific to this API, so we add it to the generic browser headers
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json" # API expects json
+        })
 
     def create_site(self, name, location, admin_user, admin_pass, admin_email, label):
         url = f"{self.base_url}/sites"
@@ -75,13 +123,13 @@ class RocketAPI:
             "static_site": False,
             "php_version": "8.3"
         }
-        response = requests.post(url, json=payload, headers=self.headers)
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
 
     def get_site_info(self, site_id):
         url = f"{self.base_url}/sites/{site_id}"
-        response = requests.get(url, headers=self.headers)
+        response = self.session.get(url)
         response.raise_for_status()
         return response.json()
 
@@ -91,23 +139,23 @@ class RocketAPI:
             "name": name,
             "key": public_key
         }
-        response = requests.post(url, json=payload, headers=self.headers)
+        response = self.session.post(url, json=payload)
         # If key already exists, we might get an error, but we can usually continue
         if response.status_code != 200 and response.status_code != 201:
-            print(f"Warning: SSH key addition returned {response.status_code}: {response.text}")
+            log_info(f"Warning: SSH key addition returned {response.status_code}: {response.text}")
         return response.json()
 
     def authorize_ssh_key(self, site_id, name):
         url = f"{self.base_url}/sites/{site_id}/ssh/keys/authorize"
         payload = { "name": name }
-        response = requests.post(url, json=payload, headers=self.headers)
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
 
     def enable_ssh_access(self, site_id):
         url = f"{self.base_url}/sites/{site_id}/settings"
         payload = { "ssh_access": 1 }
-        response = requests.patch(url, json=payload, headers=self.headers)
+        response = self.session.patch(url, json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -123,7 +171,7 @@ def get_ssh_key(key_path=None):
     return None, None
 
 async def run_remote_migration(sftp_user, host_ip, backup_url):
-    print(f"Starting remote migration on {host_ip} for user {sftp_user}...")
+    log_info(f"Starting remote migration on {host_ip} for user {sftp_user}...")
     
     # Building the remote command
     # Step 9 & 10 from instructions
@@ -143,14 +191,14 @@ async def run_remote_migration(sftp_user, host_ip, backup_url):
     process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     
     for line in process.stdout:
-        print(f"[SSH] {line.strip()}")
+        log_info(f"[SSH] {line.strip()}")
     
     process.wait()
     if process.returncode == 0:
-        print("Remote migration completed successfully!")
+        log_info("Remote migration completed successfully!")
         return True
     else:
-        print(f"Remote migration failed with return code {process.returncode}")
+        log_info(f"Remote migration failed with return code {process.returncode}")
         return False
 
 async def wait_for_page_load(page, timeout=30):
@@ -164,7 +212,7 @@ async def wait_for_page_load(page, timeout=30):
 
 async def login_to_wordpress(page, admin_url, username, password):
     """Login to WordPress admin."""
-    print(f"Logging into {admin_url}...")
+    log_info(f"Logging into {admin_url}...")
     
     await page.goto(admin_url)
     
@@ -179,7 +227,7 @@ async def login_to_wordpress(page, admin_url, username, password):
         
         # Wait for dashboard to load
         await page.wait_for_selector("#wpadminbar", timeout=10000)
-        print("Login successful!")
+        log_info("Login successful!")
         
         # Always ensure we have the correct WordPress admin URL format
         if '/wp-admin' not in admin_url:
@@ -189,12 +237,12 @@ async def login_to_wordpress(page, admin_url, username, password):
             else:
                 base_url = admin_url.split('/')[0]
             new_admin_url = f"{base_url}/wp-admin"
-            print(f"Switching to correct admin URL: {new_admin_url}")
+            log_info(f"Switching to correct admin URL: {new_admin_url}")
             return new_admin_url
         return admin_url
     
     except PlaywrightTimeoutError:
-        print("Error: Login page did not load or login failed")
+        log_info("Error: Login page did not load or login failed")
         return None
 
 async def get_base_domain(admin_url):
@@ -207,23 +255,23 @@ async def get_base_domain(admin_url):
 
 async def install_migration_plugin(page, admin_url):
     """Install the All-in-One WP Migration plugin using direct search URL."""
-    print("Installing All-in-One WP Migration plugin...")
+    log_info("Installing All-in-One WP Migration plugin...")
     
     # Get base domain
     base_domain = await get_base_domain(admin_url)
     
     # Use the direct search URL as requested
     search_url = f"{base_domain}/wp-admin/plugin-install.php?s=all-in-one%2520WP%2520Migration%2520and%2520Backup&tab=search&type=term"
-    print(f"Accessing direct plugin search page: {search_url}")
+    log_info(f"Accessing direct plugin search page: {search_url}")
     await page.goto(search_url)
     
     # Wait for page load
     if not await wait_for_page_load(page):
-        print("Warning: Plugin search page load timeout, continuing anyway...")
+        log_info("Warning: Plugin search page load timeout, continuing anyway...")
     
     try:
         # Try to find the plugin card
-        print("\nLooking for plugin card...")
+        log_info("Looking for plugin card...")
         try:
             # Using various selectors to find the plugin card
             plugin_card = await page.wait_for_selector("div.plugin-card.plugin-card-all-in-one-wp-migration", timeout=10000)
@@ -243,51 +291,51 @@ async def install_migration_plugin(page, admin_url):
                         plugin_card = plugin_cards[0]
                         print("Using first plugin card from search results")
                     else:
-                        print("No plugin cards found in search results")
+                        log_info("No plugin cards found in search results")
                         # Instead of failing, we'll try to proceed to the export page directly
                         return False
         
         if plugin_card:
-            print("Found plugin card, attempting to find installation/activation button...")
+            log_info("Found plugin card, attempting to find installation/activation button...")
             
             # Look for any action button on the plugin card
             buttons = []
             try:
                 buttons = await plugin_card.query_selector_all("a.button")
             except Exception as e:
-                print(f"Error finding buttons: {str(e)}")
+                log_info(f"Error finding buttons: {str(e)}")
             
             if buttons:
                 action_button = buttons[0]  # Use the first button found
                 button_text = await action_button.text_content()
-                print(f"Found button with text: {button_text}")
+                log_info(f"Found button with text: {button_text}")
                 
                 # Click the button regardless of its text - it could be Install Now, Activate, or already activated
-                print(f"Clicking button: {button_text}")
+                log_info(f"Clicking button: {button_text}")
                 await action_button.click()
                 
                 # Wait for potential activation button after installation
                 try:
                     activate_button = await page.wait_for_selector("a.button.activate-now:has-text('Activate')", timeout=120000)
-                    print("Installation complete, activating plugin...")
+                    log_info("Installation complete, activating plugin...")
                     await activate_button.click()
                     await page.wait_for_selector("#wpadminbar", timeout=30000)
-                    print("Plugin activated successfully!")
+                    log_info("Plugin activated successfully!")
                 except PlaywrightTimeoutError:
-                    print("No activation button found, plugin may already be activated")
+                    log_info("No activation button found, plugin may already be activated")
                     
                 # Regardless of what happened, we'll proceed to check the export page
                 return True
             else:
-                print("No action buttons found on plugin card")
+                log_info("No action buttons found on plugin card")
                 # We'll try to proceed to the export page anyway
                 return False
         else:
-            print("Failed to find plugin card")
+            log_info("Failed to find plugin card")
             return False
             
     except Exception as e:
-        print(f"Unexpected error during plugin installation: {str(e)}")
+        log_info(f"Unexpected error during plugin installation: {str(e)}")
         # Let's not fail here, try to proceed to export page
         return False
 
@@ -296,62 +344,62 @@ async def check_export_page_exists(page, admin_url):
     base_domain = await get_base_domain(admin_url)
     export_url = f"{base_domain}/wp-admin/admin.php?page=ai1wm_export"
     
-    print(f"Checking if export page exists: {export_url}")
+    log_info(f"Checking if export page exists: {export_url}")
     await page.goto(export_url)
     
     try:
         # Wait for the export dropdown button to be present
         export_button = await page.wait_for_selector("div.ai1wm-button-export", timeout=10000)
         if export_button:
-            print("Export page exists! Plugin appears to be installed and activated.")
+            log_info("Export page exists! Plugin appears to be installed and activated.")
             return True
     except PlaywrightTimeoutError:
-        print("Export page does not exist or is not accessible.")
+        log_info("Export page does not exist or is not accessible.")
         return False
     except Exception as e:
-        print(f"Error checking export page: {str(e)}")
+        log_info(f"Error checking export page: {str(e)}")
         return False
     
     return False
 
 async def get_backup_url(page, admin_url):
     """Get the backup file URL using All-in-One WP Migration plugin."""
-    print("Getting backup file URL...")
+    log_info("Getting backup file URL...")
     
     # Ensure we're using the correct WordPress admin URL for export
     base_domain = await get_base_domain(admin_url)
     export_url = f"{base_domain}/wp-admin/admin.php?page=ai1wm_export"
-    print(f"Accessing export page: {export_url}")
+    log_info(f"Accessing export page: {export_url}")
     await page.goto(export_url)
     
     try:
         # Wait for the export dropdown button to be present
-        print("Waiting for export dropdown button...")
+        log_info("Waiting for export dropdown button...")
         export_button = await page.wait_for_selector("div.ai1wm-button-export", timeout=10000)
         
         # Click the export dropdown button
-        print("Clicking export dropdown button...")
+        log_info("Clicking export dropdown button...")
         await export_button.click()
         
         # Wait for and click the File option in the dropdown
-        print("Selecting File export option...")
+        log_info("Selecting File export option...")
         file_option = await page.wait_for_selector("#ai1wm-export-file", timeout=10000)
         await file_option.click()
         
         # Wait for export to complete and find the download button
-        print("Waiting for export to complete...")
+        log_info("Waiting for export to complete...")
         download_button = await page.wait_for_selector("a.ai1wm-button-green.ai1wm-emphasize.ai1wm-button-download", timeout=300000)  # 5-minute timeout
         
         # Get the download link
         download_link = await download_button.get_attribute("href")
-        print(f"Export completed! Download URL: {download_link}")
+        log_info(f"Export completed! Download URL: {download_link}")
         return download_link
     
     except PlaywrightTimeoutError as e:
-        print(f"Error: Export timed out or failed - {str(e)}")
+        log_info(f"Error: Export timed out or failed - {str(e)}")
         return None
     except Exception as e:
-        print(f"Unexpected error during export: {str(e)}")
+        log_info(f"Unexpected error during export: {str(e)}")
         return None
 
 async def main_async(visual_mode=False):
@@ -385,8 +433,9 @@ async def main_async(visual_mode=False):
     
     # Use visual mode if specified in args or if visual_mode parameter is True
     headless = not (args.visual or visual_mode)
+    headless = not (args.visual or visual_mode)
     if not headless:
-        print("Running in visual mode - browser window will be visible")
+        log_info("Running in visual mode - browser window will be visible")
     
     playwright, browser, context, page = await setup_browser(headless=headless)
     
@@ -396,7 +445,7 @@ async def main_async(visual_mode=False):
         admin_url = await login_to_wordpress(page, args.admin_url, args.username, args.password)
         stats['login'] = time.time() - login_start
         if not admin_url:
-            print("Exiting due to login failure")
+            log_info("Exiting due to login failure")
             return
         
         # Step 2: First check if the export page already exists
@@ -405,13 +454,13 @@ async def main_async(visual_mode=False):
         
         if not export_page_exists:
             # Try to install the plugin if the export page doesn't exist
-            print("Export page not found. Attempting to install the plugin...")
+            log_info("Export page not found. Attempting to install the plugin...")
             await install_migration_plugin(page, admin_url)
             
             # Double-check if the export page exists after installation attempt
             export_page_exists = await check_export_page_exists(page, admin_url)
             if not export_page_exists:
-                print("Failed to access export page after installation attempt. Exiting.")
+                log_info("Failed to access export page after installation attempt. Exiting.")
                 return
         
         stats['plugin_installation'] = time.time() - plugin_start
@@ -422,21 +471,21 @@ async def main_async(visual_mode=False):
         stats['export'] = time.time() - export_start
         
         if backup_url:
-            print("\nTo download the backup file, use this command:")
-            print(f"wget -c {backup_url}")
+            log_info("\nTo download the backup file, use this command:")
+            log_info(f"wget -c {backup_url}")
             
             # Check if Rocket.net migration is requested
             rocket_token = args.rocket_token or os.environ.get("ROCKET_NET_TOKEN")
             if rocket_token and args.rocket_name:
-                print("\n" + "="*50)
-                print("STARTING ROCKET.NET MIGRATION")
-                print("="*50)
+                log_info("\n" + "="*50)
+                log_info("STARTING ROCKET.NET MIGRATION")
+                log_info("="*50)
                 
                 try:
                     rocket = RocketAPI(rocket_token)
                     
                     # 5. Create site
-                    print(f"Creating site '{args.rocket_name}' on Rocket.net...")
+                    log_info(f"Creating site '{args.rocket_name}' on Rocket.net...")
                     if args.rocket_admin_pass:
                         admin_pass = args.rocket_admin_pass
                     else:
@@ -456,42 +505,43 @@ async def main_async(visual_mode=False):
                     
                     site_id = site_creation['result']['id']
                     temp_domain = site_creation['result']['domain']
-                    print(f"Site created! ID: {site_id}, Domain: {temp_domain}")
-                    print(f"Admin Credentials: {args.rocket_admin_user} / {admin_pass}")
+                    log_info(f"Site created! ID: {site_id}, Domain: {temp_domain}")
+                    log_info(f"Admin Credentials: {args.rocket_admin_user} / {admin_pass}")
                     
                     # 6. Get site info
-                    print("Fetching site details (IP and SFTP User)...")
+                    log_info("Fetching site details (IP and SFTP User)...")
                     # Rocket.net might need a moment to provision
                     time.sleep(5)
                     site_info = rocket.get_site_info(site_id)
                     sftp_user = site_info['result']['sftp_username']
                     host_ip = site_info['result']['ftp_ip_address']
-                    print(f"SFTP User: {sftp_user}, host IP: {host_ip}")
+                    log_info(f"SFTP User: {sftp_user}, host IP: {host_ip}")
                     
                     # 7. SSH Key setup
                     pub_key, key_name = get_ssh_key(args.ssh_key_path)
+                    pub_key, key_name = get_ssh_key(args.ssh_key_path)
                     if pub_key:
-                        print(f"Importing SSH key '{key_name}'...")
+                        log_info(f"Importing SSH key '{key_name}'...")
                         rocket.add_ssh_key(site_id, key_name, pub_key)
-                        print(f"Authorizing SSH key '{key_name}'...")
+                        log_info(f"Authorizing SSH key '{key_name}'...")
                         rocket.authorize_ssh_key(site_id, key_name)
-                        print("Enabling SSH access...")
+                        log_info("Enabling SSH access...")
                         rocket.enable_ssh_access(site_id)
                         
                         # Wait a bit for SSH access to be active
-                        print("Waiting for SSH to become active (10s)...")
+                        log_info("Waiting for SSH to become active (10s)...")
                         time.sleep(10)
                         
                         # 8, 9, 10. Run remote migration
                         await run_remote_migration(sftp_user, host_ip, backup_url)
                     else:
-                        print("Warning: No SSH public key found. Skipping remote migration steps.")
-                        print(f"You can manually migration by connecting to {sftp_user}@{host_ip}")
+                        log_info("Warning: No SSH public key found. Skipping remote migration steps.")
+                        log_info(f"You can manually migration by connecting to {sftp_user}@{host_ip}")
                 
                 except Exception as e:
-                    print(f"Error during Rocket.net migration: {str(e)}")
+                    log_info(f"Error during Rocket.net migration: {str(e)}")
         else:
-            print("Failed to get backup URL")
+            log_info("Failed to get backup URL")
         
     finally:
         # In visual mode, wait for user to press Enter before closing
@@ -504,9 +554,9 @@ async def main_async(visual_mode=False):
     
     # Calculate total time and display statistics
     stats['total'] = time.time() - start_time
-    print("\n" + "="*50)
-    print("EXECUTION STATISTICS")
-    print("="*50)
+    log_info("\n" + "="*50)
+    log_info("EXECUTION STATISTICS")
+    log_info("="*50)
     print(f"Login time: {stats['login']:.2f} seconds")
     print(f"Plugin installation time: {stats['plugin_installation']:.2f} seconds")
     print(f"Export time: {stats['export']:.2f} seconds")

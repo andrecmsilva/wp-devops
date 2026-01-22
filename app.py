@@ -6,6 +6,7 @@ import subprocess
 import os
 import asyncio
 import json
+import sys
 
 app = FastAPI()
 
@@ -35,7 +36,7 @@ async def migrate(request: Request):
     
     # Build arguments for exportaiocli.py
     cmd = [
-        "python3", "exportaiocli.py",
+        sys.executable, "-u", "exportaiocli.py",
         "--admin-url", data.get("adminUrl"),
         "--username", data.get("username"),
         "--password", data.get("password")
@@ -55,23 +56,32 @@ async def migrate(request: Request):
         cmd.append("--visual")
 
     async def stream_logs():
-        # Run the script and stream output
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=os.getcwd()
-        )
-        
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            # Yield as SSE data
-            yield f"data: {line.decode().rstrip()}\n\n"
-        
-        await process.wait()
-        yield "data: [DONE]\n\n"
+        try:
+            # Run the script and stream output
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=os.getcwd()
+            )
+            
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                # Yield as SSE data
+                try:
+                    decoded_line = line.decode('utf-8', errors='replace').rstrip()
+                except Exception as e:
+                    decoded_line = f"[INTERNAL ERROR] Failed to decode log line: {str(e)}"
+                
+                yield f"data: {decoded_line}\n\n"
+            
+            await process.wait()
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: [INTERNAL ERROR] Failed to start process: {str(e)}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream_logs(), media_type="text/event-stream")
 
